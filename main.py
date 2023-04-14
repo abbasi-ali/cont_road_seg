@@ -159,8 +159,8 @@ def train_cont_cities_vanilla(data_root, save_name, loss='CE', seed=0):
     data_root = os.path.join(home_path, 'data', data_root)
     label_root = os.path.join(home_path, 'data', 'gtFine')
 
-    # city_splits = get_city_task_splits(data_root, task_num)
-    city_splits = get_city_task_splits(data_root, 18) #one city per task
+    city_splits = get_city_task_splits(data_root, task_num)
+    # city_splits = get_city_task_splits(data_root, 18) #one city per task
 
     print(f'Task splits are {city_splits}')
 
@@ -230,9 +230,9 @@ def train_cont_cities_vanilla(data_root, save_name, loss='CE', seed=0):
                     plt.savefig(f'{save_path}/{save_name}_training_results.png')
                     plt.close()
 
-        if t_cnt == 0:
-            for name, param in model.pretrained_net.named_parameters():
-                param.requires_grad = False
+        # if t_cnt == 0:
+        #     for name, param in model.pretrained_net.named_parameters():
+        #         param.requires_grad = False
         
         for eval_cnt in range(task_num):            
             acc_mat[t_cnt, eval_cnt]  = eval(model, test_datasets[eval_cnt], verbose=False)
@@ -378,7 +378,7 @@ def train_cont_weathers_vanilla(save_name, loss='CE', seed=0):
 # train_one_task('leftImg8bit', 'clean_all_cities_VGG19') 
 # train_one_task('leftImg8bit', 'clean_all_cities_VGG19_focal_loss', loss='focal') 
 
-train_cont_cities_vanilla('leftImg8bit', 'clean_all_cities_VGG19_focalloss_cont_vanilla_t6_opt', loss='focal')
+# train_cont_cities_vanilla('leftImg8bit', 'clean_all_cities_VGG19_focalloss_cont_vanilla_t6_3pt', loss='focal')
 
 # train_cont_weathers_vanilla('weathers_VGG19_focalloss_cont_vanilla_t3', loss='focal')
 
