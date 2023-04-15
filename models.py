@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
+import numpy as np
 import torchvision.models as models
+
 
 class Res18BB(nn.Module):
     def __init__(self, num_classes):
@@ -179,6 +181,43 @@ class FCN8s(nn.Module):
         score = self.classifier(score)                    # size=(N, n_class, x.H/1, x.W/1)
 
         return score  # size=(N, n_class, x.H/1, x.W/1)
+    
+
+class FCN8s(nn.Module):
+
+    def __init__(self, pretrained_net, n_class):
+        super().__init__()
+        self.n_class = n_class
+        self.pretrained_net = pretrained_net
+        self.relu    = nn.ReLU(inplace=True)
+        self.deconv1 = nn.ConvTranspose2d(512, 512, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1)
+        self.bn1     = nn.BatchNorm2d(512)
+        self.deconv2 = nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1)
+        self.bn2     = nn.BatchNorm2d(256)
+        self.deconv3 = nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1)
+        self.bn3     = nn.BatchNorm2d(128)
+        self.deconv4 = nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1)
+        self.bn4     = nn.BatchNorm2d(64)
+        self.deconv5 = nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1)
+        self.bn5     = nn.BatchNorm2d(32)
+        self.classifier = nn.Conv2d(32, n_class, kernel_size=1)
+
+    def forward(self, x):
+        output = self.pretrained_net(x)
+        x5 = output['x5']  # size=(N, 512, x.H/32, x.W/32)
+        x4 = output['x4']  # size=(N, 512, x.H/16, x.W/16)
+        x3 = output['x3']  # size=(N, 256, x.H/8,  x.W/8)
+
+        score = self.relu(self.deconv1(x5))               # size=(N, 512, x.H/16, x.W/16)
+        score = self.bn1(score + x4)                      # element-wise add, size=(N, 512, x.H/16, x.W/16)
+        score = self.relu(self.deconv2(score))            # size=(N, 256, x.H/8, x.W/8)
+        score = self.bn2(score + x3)                      # element-wise add, size=(N, 256, x.H/8, x.W/8)
+        score = self.bn3(self.relu(self.deconv3(score)))  # size=(N, 128, x.H/4, x.W/4)
+        score = self.bn4(self.relu(self.deconv4(score)))  # size=(N, 64, x.H/2, x.W/2)
+        score = self.bn5(self.relu(self.deconv5(score)))  # size=(N, 32, x.H, x.W)
+        score = self.classifier(score)                    # size=(N, n_class, x.H/1, x.W/1)
+
+        return score  # size=(N, n_class, x.H/1, x.W/1)
 
 
 class FCN8sMH(nn.Module):
@@ -227,7 +266,95 @@ class FCN8sMH(nn.Module):
 
         return scores  # size=(N, n_class, x.H/1, x.W/1)
 
+class FCN8sMHMem(nn.Module):
 
+    def __init__(self, pretrained_net, n_class, n_tasks, mem_size):
+        super().__init__()
+        self.n_class = n_class
+        self.n_tasks = n_tasks
+
+        self.mem = {}
+        
+        # for t in range(n_tasks):
+        #     self.mem[f'task_{t}'] = {}
+
+        self.mem_size = mem_size
+
+        self.pretrained_net = pretrained_net
+        self.relu    = nn.ReLU(inplace=True)
+        self.deconv1 = nn.ConvTranspose2d(512, 512, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1)
+        self.bn1     = nn.BatchNorm2d(512)
+        self.deconv2 = nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1)
+        self.bn2     = nn.BatchNorm2d(256)
+        self.deconv3 = nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1)
+        self.bn3     = nn.BatchNorm2d(128)
+        self.deconv4 = nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1)
+        self.bn4     = nn.BatchNorm2d(64)
+        self.deconv5 = nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1)
+        self.bn5     = nn.BatchNorm2d(32)
+
+        self.heads = nn.ModuleList()
+        for h in range(n_tasks):
+            self.heads.append(nn.Conv2d(32, n_class, kernel_size=1))
+
+    def store_mem(self, task_id, ds):
+        #smple randomly from a list 
+        
+        dl = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=True)
+        
+        x_data = []
+        y_data = []
+        t_ids = []
+        for i, (x, y) in enumerate(dl):
+            x_data.append(x)
+            y_data.append(y)
+            t_ids.append(task_id)
+
+            if i == (self.mem_size // self.n_tasks-1):
+                break
+
+        x_data = torch.cat(x_data, dim=0)
+        y_data = torch.cat(y_data, dim=0)
+        t_ids = torch.tensor(t_ids)
+
+        if 'x' in self.mem.keys():
+            self.mem['x'] = torch.cat([self.mem['x'], x_data], dim=0)
+            self.mem['y'] = torch.cat([self.mem['y'], y_data], dim=0)
+            self.mem['t'] = torch.cat([self.mem['t'], t_ids], dim=0)
+        else:
+            self.mem['x'] = x_data
+            self.mem['y'] = y_data
+            self.mem['t'] = t_ids
+
+    def sample_mem(self, batch_size):
+        #smple randomly from a list 
+        idx = torch.randint(0, self.mem['x'].shape[0], (batch_size,))
+
+        return self.mem['x'][idx], self.mem['y'][idx], self.mem['t'][idx]
+          
+
+    def forward(self, x):
+        output = self.pretrained_net(x)
+        x5 = output['x5']  # size=(N, 512, x.H/32, x.W/32)
+        x4 = output['x4']  # size=(N, 512, x.H/16, x.W/16)
+        x3 = output['x3']  # size=(N, 256, x.H/8,  x.W/8)
+
+        score = self.relu(self.deconv1(x5))               # size=(N, 512, x.H/16, x.W/16)
+        score = self.bn1(score + x4)                      # element-wise add, size=(N, 512, x.H/16, x.W/16)
+        score = self.relu(self.deconv2(score))            # size=(N, 256, x.H/8, x.W/8)
+        score = self.bn2(score + x3)                      # element-wise add, size=(N, 256, x.H/8, x.W/8)
+        score = self.bn3(self.relu(self.deconv3(score)))  # size=(N, 128, x.H/4, x.W/4)
+        score = self.bn4(self.relu(self.deconv4(score)))  # size=(N, 64, x.H/2, x.W/2)
+        score = self.bn5(self.relu(self.deconv5(score)))  # size=(N, 32, x.H, x.W)
+        # score = self.classifier(score)                    # size=(N, n_class, x.H/1, x.W/1)
+        
+        scores = []
+        for h in range(self.n_tasks):
+            scores.append(self.heads[h](score))
+
+
+        return scores  # size=(N, n_class, x.H/1, x.W/1)
+    
 # # Create the network with the desired number of output classes
 # num_classes = 20  # Adjust this number based on your dataset
 # fcn = FCN(num_classes=num_classes)

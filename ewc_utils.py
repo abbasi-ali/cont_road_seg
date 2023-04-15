@@ -6,6 +6,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def register_ewc_params(model, dl, loss_type, t_cnt=None, multihead=False):
+    model.eval()
 
     norm_fact = len(dl)
     
@@ -32,6 +33,7 @@ def register_ewc_params(model, dl, loss_type, t_cnt=None, multihead=False):
                 else:
                     current_fisher = 0
 
+                
                 new_fisher = current_fisher + p.grad.detach() ** 2 / norm_fact 
                 model.register_buffer(f"fisher_{n.replace('.', '_')}", new_fisher)
 
@@ -40,6 +42,7 @@ def register_ewc_params(model, dl, loss_type, t_cnt=None, multihead=False):
             model.register_buffer(f"mean_{n.replace('.', '_')}", p.data.clone())
 
     model.zero_grad()
+    model.train()
 
 
 def compute_ewc_loss(model):
@@ -48,6 +51,7 @@ def compute_ewc_loss(model):
         if 'heads' not in n:
             loss += (getattr(model, f"fisher_{n.replace('.', '_')}") * \
                 (p - getattr(model, f"mean_{n.replace('.', '_')}")).pow(2)).sum()
+            
 
     return loss / 2.
 

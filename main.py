@@ -134,10 +134,12 @@ def train_one_task(data_root, save_name, loss='CE'):
                 plt.savefig(f'{save_name}_training_results.png')
                 plt.close()
 
-def train_cont_cities_vanilla(data_root, save_name, loss='CE', seed=0):
+def train_cont_cities_vanilla(data_root, save_name, loss='CE', seed=0, multihead=False):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+    task_num = 6
 
     if not os.path.exists(f'./{save_name}'):
         os.makedirs(save_name)
@@ -145,14 +147,17 @@ def train_cont_cities_vanilla(data_root, save_name, loss='CE', seed=0):
     save_path = os.path.join(os.getcwd(), save_name)
 
     vgg_model = VGGNet(model='vgg19', requires_grad=True)
-    model = FCN8s(pretrained_net=vgg_model, n_class=34).to(device)
+    if multihead:
+        model  = FCN8sMH(pretrained_net=vgg_model, n_class=34, n_tasks=task_num).to(device)
+    else:
+        model = FCN8s(pretrained_net=vgg_model, n_class=34).to(device)
 
     nepoch = 20
     bs = 16
     lr=1e-3
     save_every = 5
     eval_every = 10
-    task_num = 6
+    
 
     transform = transforms.Compose([
         transforms.Resize((256, 512))
@@ -162,8 +167,8 @@ def train_cont_cities_vanilla(data_root, save_name, loss='CE', seed=0):
     data_root = os.path.join(home_path, 'data', data_root)
     label_root = os.path.join(home_path, 'data', 'gtFine')
 
-    city_splits = get_city_task_splits(data_root, task_num)
-    # city_splits = get_city_task_splits(data_root, 18) #one city per task
+    # city_splits = get_city_task_splits(data_root, task_num)
+    city_splits = get_city_task_splits(data_root, 18) #one city per task
 
     print(f'Task splits are {city_splits}')
 
@@ -200,6 +205,9 @@ def train_cont_cities_vanilla(data_root, save_name, loss='CE', seed=0):
 
                 optimizer.zero_grad()
                 output = model(image)
+                if multihead:
+                    output = output[t_cnt]
+
                 loss = criterion(output, mask)
                 loss.backward()
                 optimizer.step()
@@ -207,7 +215,7 @@ def train_cont_cities_vanilla(data_root, save_name, loss='CE', seed=0):
                 loss_.append(loss.item())
 
                 if (i+1) % eval_every == 0 or (i+1) == len(dl_train):
-                    __ = eval(model, test_datasets[t_cnt], verbose=True)
+                    __ = eval(model, test_datasets[t_cnt], verbose=True, multihead=multihead, t_cnt=t_cnt)
                     torch.save(model.state_dict(), f'{save_path}/{save_name}_model_t{t_cnt}.pth')
 
                 if (i+1) % save_every == 0 or (i+1) == len(dl_train):
@@ -238,7 +246,8 @@ def train_cont_cities_vanilla(data_root, save_name, loss='CE', seed=0):
         #         param.requires_grad = False
         
         for eval_cnt in range(task_num):            
-            acc_mat[t_cnt, eval_cnt]  = eval(model, test_datasets[eval_cnt], verbose=False)
+            acc_mat[t_cnt, eval_cnt]  = eval(model, test_datasets[eval_cnt], 
+                                             verbose=False, multihead=multihead, t_cnt=eval_cnt)
 
         np.save(f'{save_path}/{save_name}_acc_mat.npy', acc_mat)
         
@@ -379,7 +388,7 @@ def train_cont_cities_ewc(data_root, save_name, loss_type='CE', seed=0, multihea
     np.random.seed(seed)
     random.seed(seed)
 
-    weight_ewc = 5e3
+    weight_ewc = 1e12
     task_num = 6
 
     if not os.path.exists(f'./{save_name}'):
@@ -458,10 +467,16 @@ def train_cont_cities_ewc(data_root, save_name, loss_type='CE', seed=0, multihea
 
                 loss = loss_critic + loss_ewc * weight_ewc
 
+                # if t_cnt > 0:
+                #     print(loss_ewc*weight_ewc, 'dfdfd')
+
                 loss.backward()
                 optimizer.step()
 
                 loss_.append(loss.item())
+
+                # if i == 4:
+                #     break 
 
                 if (i+1) % eval_every == 0 or (i+1) == len(dl_train):
                     __ = eval(model, test_datasets[t_cnt], verbose=True, 
@@ -495,6 +510,11 @@ def train_cont_cities_ewc(data_root, save_name, loss_type='CE', seed=0, multihea
 
 
         register_ewc_params(model, dl_train, loss_type=loss_type, multihead=multihead, t_cnt=t_cnt)
+
+        # if t_cnt == 0 and multihead:
+        #     for n, p in model.named_parameters():
+        #         if 'heads' not in n:
+        #             p.requires_grad = False
         
         for eval_cnt in range(task_num):            
             acc_mat[t_cnt, eval_cnt]  = eval(model, test_datasets[eval_cnt], 
@@ -513,7 +533,6 @@ def train_cont_cities_er(data_root, save_name, loss_type='CE', seed=0, multihead
     np.random.seed(seed)
     random.seed(seed)
 
-    weight_ewc = 5e3
     task_num = 6
 
     if not os.path.exists(f'./{save_name}'):
@@ -524,7 +543,7 @@ def train_cont_cities_er(data_root, save_name, loss_type='CE', seed=0, multihead
     vgg_model = VGGNet(model='vgg19', requires_grad=True)
 
     if multihead:
-        model = FCN8sMH(pretrained_net=vgg_model, n_class=34, n_tasks=task_num).to(device)
+        model = FCN8sMHMem(pretrained_net=vgg_model, n_class=34, n_tasks=task_num, mem_size=120).to(device)
     else:
         model = FCN8s(pretrained_net=vgg_model, n_class=34).to(device)
 
@@ -585,12 +604,25 @@ def train_cont_cities_er(data_root, save_name, loss_type='CE', seed=0, multihead
                     output = output[t_cnt]
 
                 loss_critic = criterion(output, mask)
-                if t_cnt > 0:    
-                    loss_ewc = compute_ewc_loss(model)
-                else:
-                    loss_ewc = 0
 
-                loss = loss_critic + loss_ewc * weight_ewc
+                if t_cnt > 0:
+                    x_mem, y_mem, t_mem = model.sample_mem(bs)
+                    x_mem, y_mem, t_mem = x_mem.to(device), y_mem.squeeze().to(device), t_mem.to(device)
+                    output_mem = model(x_mem)
+                    if multihead:
+                        output_mem = torch.stack(output_mem, dim=0).permute(1, 0, 2, 3, 4)
+                        
+                        t_mem = t_mem.reshape(-1, 1, 1, 1, 1).expand(-1, 1, output_mem.shape[2], 
+                                                                 output_mem.shape[3], 
+                                                                 output_mem.shape[4])  
+                        
+                        output_mem = torch.gather(output_mem, dim=1, index=t_mem).squeeze(1)
+                        
+                    loss_mem = criterion(output_mem, y_mem)
+                else:
+                    loss_mem = 0
+
+                loss = loss_critic + loss_mem                        
 
                 loss.backward()
                 optimizer.step()
@@ -627,9 +659,8 @@ def train_cont_cities_er(data_root, save_name, loss_type='CE', seed=0, multihead
                     plt.close()
 
 
-
-        register_ewc_params(model, dl_train, loss_type=loss_type, multihead=multihead, t_cnt=t_cnt)
-        
+        model.store_mem(t_cnt, train_datasets[t_cnt])
+               
         for eval_cnt in range(task_num):            
             acc_mat[t_cnt, eval_cnt]  = eval(model, test_datasets[eval_cnt], 
                                              verbose=False, multihead=multihead, t_cnt=eval_cnt)
@@ -650,10 +681,17 @@ def train_cont_cities_er(data_root, save_name, loss_type='CE', seed=0, multihead
 
 # train_cont_cities_vanilla('leftImg8bit', 'clean_all_cities_VGG19_focalloss_cont_vanilla_t6_3pt', loss='focal')
 
+# train_cont_cities_vanilla('leftImg8bit', 
+#                           'clean_all_cities_VGG19_focalloss_cont_vanilla_t6_1pt_multihead',
+#                           loss='focal', multihead=True)
+
 # train_cont_cities_ewc('leftImg8bit', 'clean_all_cities_VGG19_focalloss_ewc_t6_1pt', loss_type='focal')
 
-# train_cont_cities_ewc('leftImg8bit', 'clean_all_cities_VGG19_focalloss_ewc_t6_1pt_multihead', 
+# train_cont_cities_ewc('leftImg8bit', 'clean_all_cities_VGG19_focalloss_ewc_t6_1pt_multihead_w1e12', 
 #                       loss_type='focal', multihead=True)
 
 # train_cont_weathers_vanilla('weathers_VGG19_focalloss_cont_vanilla_t3', loss='focal')
+
+train_cont_cities_er('leftImg8bit', 'clean_all_cities_VGG19_focalloss_ER_t6_1pt_multihead', 
+                      loss_type='focal', multihead=True)
 
