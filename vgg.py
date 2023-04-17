@@ -2,14 +2,14 @@
 import torchvision.models as models
 import torch.nn as nn
 
-def make_layers(cfg, batch_norm=False):
+def make_layers(cfg, batch_norm=False, bias=True):
     layers = []
     in_channels = 3
     for v in cfg:
         if v == 'M':
             layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
         else:
-            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
+            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1, bias=bias)
             if batch_norm:
                 layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
             else:
@@ -33,12 +33,12 @@ cfg = {
 }
 
 class VGGNet(models.VGG):
-    def __init__(self, pretrained=True, model='vgg16', requires_grad=True, remove_fc=True, show_params=False):
-        super().__init__(make_layers(cfg[model]))
+    def __init__(self, pretrained=True, model='vgg16', requires_grad=True, remove_fc=True, show_params=False, bias=True):
+        super().__init__(make_layers(cfg[model], bias=bias))
         self.ranges = ranges[model]
 
         if pretrained:
-            exec("self.load_state_dict(models.%s(pretrained=True).state_dict())" % model)
+            exec("self.load_state_dict(models.%s(pretrained=True).state_dict(), strict=False)" % model)
 
         if not requires_grad:
             for param in super().parameters():

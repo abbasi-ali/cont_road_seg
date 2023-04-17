@@ -2,7 +2,12 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torchvision.models as models
+import torch.nn.functional as F
+import optim
+from collections import defaultdict
+import re 
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class Res18BB(nn.Module):
     def __init__(self, num_classes):
@@ -355,6 +360,144 @@ class FCN8sMHMem(nn.Module):
 
         return scores  # size=(N, n_class, x.H/1, x.W/1)
     
+
+class FCN8sMHCovarNull(nn.Module):
+
+    def __init__(self, pretrained_net, n_class, n_tasks, lr, svd_thres=1e4, weight_decay=1e-5):
+        super().__init__()
+        self.n_class = n_class
+        self.n_tasks = n_tasks
+        self.svd_thres = svd_thres
+
+        self.task_count = 0
+
+        self.fea_in_hook = {}
+        self.fea_in = defaultdict(torch.Tensor)
+        self.fea_in_count = defaultdict(int)
+
+        self.weight_decay = weight_decay
+        self.lr = lr
+        self.pretrained_net = pretrained_net
+        self.relu    = nn.ReLU(inplace=True)
+        self.deconv1 = nn.ConvTranspose2d(512, 512, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1, bias=False)
+        self.bn1     = nn.BatchNorm2d(512)
+        self.deconv2 = nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1, bias=False)
+        self.bn2     = nn.BatchNorm2d(256)
+        self.deconv3 = nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1, bias=False)
+        self.bn3     = nn.BatchNorm2d(128)
+        self.deconv4 = nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1, bias=False)
+        self.bn4     = nn.BatchNorm2d(64)
+        self.deconv5 = nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, dilation=1, output_padding=1, bias=False)
+        self.bn5     = nn.BatchNorm2d(32)
+
+        self.heads = nn.ModuleList()
+        for h in range(n_tasks):
+            self.heads.append(nn.Conv2d(32, n_class, kernel_size=1, bias=False))
+
+        self.init_model_optimizer(0)
+    
+    def compute_cov(self, module, fea_in, fea_out):
+        if isinstance(module, nn.Linear):
+            self.update_cov(torch.mean(fea_in[0], 0, True), module.weight)
+
+        elif isinstance(module, nn.Conv2d) or isinstance(module, nn.ConvTranspose2d):
+            kernel_size = module.kernel_size
+            stride = module.stride
+            padding = module.padding
+
+            
+            fea_in_ = F.unfold(
+                torch.mean(fea_in[0], 0, True), kernel_size=kernel_size, padding=padding, stride=stride)
+
+            fea_in_ = fea_in_.permute(0, 2, 1)
+            fea_in_ = fea_in_.reshape(-1, fea_in_.shape[-1])
+            self.update_cov(fea_in_, module.weight)
+        
+
+        torch.cuda.empty_cache()
+        return None
+    
+    def update_cov(self, fea_in, k):
+        cov = torch.mm(fea_in.transpose(0, 1), fea_in)
+        # print(cov.shape, 'cov shape', fea_in.shape, 'fea_in shape')
+        if len(self.fea_in[k]) == 0:
+            self.fea_in[k] = cov
+        else:
+            self.fea_in[k] = self.fea_in[k] + cov
+
+    def init_model_optimizer(self, t_id):
+        fea_params = [p for n, p in self.named_parameters(
+        ) if not bool(re.match('heads', n)) and 'bn' not in n]
+
+        cls_params_all = list(
+            p for n, p in self.named_children() if bool(re.match('heads', n)))[0]
+        
+        # for n, p in self.named_children():
+        #     print(n, 'dfdfdfdfdfdfdf')
+
+        
+        cls_params = list(cls_params_all[t_id].parameters())
+        
+        bn_params = [p for n, p in self.named_parameters() if 'bn' in n]
+
+        model_optimizer_arg = {'params': [{'params': fea_params, 'svd': True, 'lr': self.lr,
+                                            'thres': self.svd_thres},
+                                          {'params': cls_params, 'weight_decay': 0.0,
+                                              'lr': self.lr},
+                                          {'params': bn_params, 'lr': self.lr}],
+                               'lr': self.lr,
+                               'weight_decay': self.weight_decay}
+
+        self.model_optimizer = getattr(
+            optim, 'Adam')(**model_optimizer_arg)
+        
+    def reset_optim(self, lr, t_id):
+        self.lr = lr
+        self.init_model_optimizer(t_id=t_id)
+        self.zero_grad()
+        
+    def update_optim_transforms(self, train_loader):
+        modules = [m for n, m in self.named_modules() if hasattr(
+            m, 'weight') and not bool(re.match('heads', n))]
+        handles = []
+        for m in modules:
+            handles.append(m.register_forward_hook(hook=self.compute_cov))
+
+        
+        for i, (inputs, target) in enumerate(train_loader):
+            inputs = inputs.to(device)
+            self.forward(inputs)
+            
+        self.model_optimizer.get_eigens(self.fea_in)
+        
+        self.model_optimizer.get_transforms()
+        for h in handles:
+            h.remove()
+        torch.cuda.empty_cache()
+
+    def forward(self, x):
+        output = self.pretrained_net(x)
+        x5 = output['x5']  # size=(N, 512, x.H/32, x.W/32)
+        x4 = output['x4']  # size=(N, 512, x.H/16, x.W/16)
+        x3 = output['x3']  # size=(N, 256, x.H/8,  x.W/8)
+
+        score = self.relu(self.deconv1(x5))               # size=(N, 512, x.H/16, x.W/16)
+        score = self.bn1(score + x4)                      # element-wise add, size=(N, 512, x.H/16, x.W/16)
+        score = self.relu(self.deconv2(score))            # size=(N, 256, x.H/8, x.W/8)
+        score = self.bn2(score + x3)                      # element-wise add, size=(N, 256, x.H/8, x.W/8)
+        score = self.bn3(self.relu(self.deconv3(score)))  # size=(N, 128, x.H/4, x.W/4)
+        score = self.bn4(self.relu(self.deconv4(score)))  # size=(N, 64, x.H/2, x.W/2)
+        score = self.bn5(self.relu(self.deconv5(score)))  # size=(N, 32, x.H, x.W)
+        # score = self.classifier(score)                    # size=(N, n_class, x.H/1, x.W/1)
+        
+        scores = []
+        for h in range(self.n_tasks):
+            scores.append(self.heads[h](score))
+
+
+        return scores  # size=(N, n_class, x.H/1, x.W/1)
+
+
 # # Create the network with the desired number of output classes
 # num_classes = 20  # Adjust this number based on your dataset
 # fcn = FCN(num_classes=num_classes)
